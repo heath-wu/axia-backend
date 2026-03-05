@@ -154,6 +154,14 @@ router.put('/:id', async (req, res: Response) => {
       },
     });
 
+    // Sync pending payments to new rent amount (paid/overdue keep their original amount)
+    if (rentAmount !== undefined) {
+      await prisma.payment.updateMany({
+        where: { leaseId: id, status: 'pending' },
+        data: { amount: rentAmount },
+      });
+    }
+
     res.json({ ...lease, rentAmount: Number(lease.rentAmount) });
   } catch (err) {
     console.error(err);
