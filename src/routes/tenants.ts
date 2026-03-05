@@ -107,4 +107,32 @@ router.put('/:id', async (req, res: Response) => {
   }
 });
 
+// DELETE /tenants/:id
+router.delete('/:id', async (req, res: Response) => {
+  const { id } = req.params;
+
+  try {
+    const existing = await prisma.tenant.findUnique({ where: { id } });
+    if (!existing) {
+      res.status(404).json({ error: 'Tenant not found' });
+      return;
+    }
+
+    const activeLeases = await prisma.lease.count({
+      where: { tenantId: id, status: 'active' },
+    });
+
+    if (activeLeases > 0) {
+      res.status(400).json({ error: 'Cannot delete tenant with active leases' });
+      return;
+    }
+
+    await prisma.tenant.delete({ where: { id } });
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete tenant' });
+  }
+});
+
 export default router;
