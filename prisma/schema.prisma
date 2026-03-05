@@ -1,0 +1,70 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id         String     @id
+  email      String     @unique
+  name       String?
+  createdAt  DateTime   @default(now()) @map("created_at")
+  properties Property[]
+
+  @@map("users")
+}
+
+model Property {
+  id        String   @id @default(cuid())
+  ownerId   String   @map("owner_id")
+  owner     User     @relation(fields: [ownerId], references: [id])
+  name      String
+  address   String
+  createdAt DateTime @default(now()) @map("created_at")
+  leases    Lease[]
+
+  @@map("properties")
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  phone     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  leases    Lease[]
+
+  @@map("tenants")
+}
+
+model Lease {
+  id         String    @id @default(cuid())
+  propertyId String    @map("property_id")
+  property   Property  @relation(fields: [propertyId], references: [id])
+  tenantId   String    @map("tenant_id")
+  tenant     Tenant    @relation(fields: [tenantId], references: [id])
+  rentAmount Decimal   @map("rent_amount") @db.Decimal(10, 2)
+  startDate  DateTime  @map("start_date") @db.Date
+  endDate    DateTime  @map("end_date") @db.Date
+  status     String    @default("active")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  payments   Payment[]
+
+  @@map("leases")
+}
+
+model Payment {
+  id        String   @id @default(cuid())
+  leaseId   String   @map("lease_id")
+  lease     Lease    @relation(fields: [leaseId], references: [id])
+  amount    Decimal  @db.Decimal(10, 2)
+  dueDate   DateTime @map("due_date") @db.Date
+  status    String   @default("pending")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("payments")
+}
