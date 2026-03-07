@@ -3,7 +3,13 @@ import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const prisma = new PrismaClient();
+const prisma = new PrismaClient({
+  datasources: {
+    db: {
+      url: process.env.DIRECT_URL || process.env.DATABASE_URL,
+    },
+  },
+});
 
 function startOfMonth(date: Date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
@@ -150,8 +156,8 @@ async function seed() {
     tenantsData.map((t) =>
       prisma.tenant.upsert({
         where: { id: `seed-tenant-${t.email}` },
-        update: {},
-        create: { id: `seed-tenant-${t.email}`, ...t },
+        update: { ownerId: user.id },
+        create: { id: `seed-tenant-${t.email}`, ownerId: user.id, ...t },
       })
     )
   );
@@ -166,7 +172,7 @@ async function seed() {
       propertyId: properties[0].id,
       tenantId: tenants[0].id,
       rentAmount: 1850,
-      startDate: createUtcDate(now.getFullYear() - 1, 0, 1),
+      startDate: createUtcDate(now.getFullYear(), 0, 1),
       endDate: createUtcDate(now.getFullYear() + 1, 0, 1),
       status: 'active',
     },
@@ -175,17 +181,17 @@ async function seed() {
       propertyId: properties[0].id,
       tenantId: tenants[1].id,
       rentAmount: 1750,
-      startDate: createUtcDate(now.getFullYear() - 1, 3, 1),
-      endDate: createUtcDate(now.getFullYear() + 1, 3, 1),
-      status: 'active',
+      startDate: createUtcDate(now.getFullYear() - 1, 0, 1),
+      endDate: createUtcDate(now.getFullYear(), 0, 1),
+      status: 'expired',
     },
     {
       id: 'seed-lease-3',
       propertyId: properties[1].id,
       tenantId: tenants[2].id,
       rentAmount: 2200,
-      startDate: createUtcDate(now.getFullYear(), 0, 1),
-      endDate: createUtcDate(now.getFullYear() + 1, 0, 1),
+      startDate: createUtcDate(now.getFullYear() - 1, 6, 1),
+      endDate: createUtcDate(now.getFullYear(), 6, 1),
       status: 'active',
     },
     {

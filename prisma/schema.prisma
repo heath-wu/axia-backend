@@ -14,6 +14,7 @@ model User {
   name       String?
   createdAt  DateTime   @default(now()) @map("created_at")
   properties Property[]
+  tenants    Tenant[]
 
   @@map("users")
 }
@@ -32,6 +33,8 @@ model Property {
 
 model Tenant {
   id        String   @id @default(cuid())
+  ownerId   String?  @map("owner_id")
+  owner     User?    @relation(fields: [ownerId], references: [id])
   name      String
   email     String
   phone     String?
@@ -39,6 +42,7 @@ model Tenant {
   leases    Lease[]
 
   @@map("tenants")
+  @@index([ownerId])
 }
 
 model Lease {

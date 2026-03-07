@@ -130,12 +130,12 @@ router.delete('/:id', async (req, res: Response) => {
       return;
     }
 
-    const activeLeases = await prisma.lease.count({
-      where: { propertyId: id, status: 'active' },
+    const leaseCount = await prisma.lease.count({
+      where: { propertyId: id },
     });
 
-    if (activeLeases > 0) {
-      res.status(400).json({ error: 'Cannot delete property with active leases' });
+    if (leaseCount > 0) {
+      res.status(400).json({ error: 'Cannot delete property with existing leases' });
       return;
     }
 

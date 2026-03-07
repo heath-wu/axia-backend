@@ -1,6 +1,13 @@
 import { Router, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { AuthenticatedRequest } from '../middleware/auth';
+import {
+  deriveLeaseStatus,
+  isValidDate,
+  validateStatusForDates,
+  toDateKey,
+} from '../lib/lease-validation';
 
 const router = Router();
 
@@ -28,22 +35,38 @@ function getInitialPaymentStatus(dueDate: Date, now = new Date()) {
   return dueKey < todayKey ? 'overdue' : 'pending';
 }
 
-function toDateKey(date: Date) {
-  return date.toISOString().slice(0, 10);
+async function hasPropertyOverlap(
+  propertyId: string,
+  startDate: Date,
+  endDate: Date,
+  excludeLeaseId?: string
+) {
+  const overlaps = await prisma.lease.findFirst({
+    where: {
+      propertyId,
+      status: { not: 'closed' },
+      ...(excludeLeaseId ? { id: { not: excludeLeaseId } } : {}),
+      startDate: { lt: endDate },
+      endDate: { gt: startDate },
+    },
+    select: { id: true },
+  });
+
+  return !!overlaps;
 }
 
-function normalizeLeaseStatus(startDate: Date, requestedStatus?: string, now = new Date()) {
-  const desiredStatus = requestedStatus ?? 'active';
-  const todayKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
-    .toISOString()
-    .slice(0, 10);
-  const startKey = toDateKey(startDate);
-
-  if (desiredStatus === 'active' && startKey > todayKey) {
-    return 'pending';
+function handleLeaseWriteError(err: unknown, res: Response, fallbackMessage: string) {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    const message = String(err.meta?.message || err.message);
+    if (message.includes('leases_no_overlap_per_property')) {
+      res.status(409).json({ error: 'Property already has a lease in this date range' });
+      return true;
+    }
   }
 
-  return desiredStatus;
+  console.error(err);
+  res.status(500).json({ error: fallbackMessage });
+  return true;
 }
 
 // GET /leases — list all leases for authenticated user's properties
@@ -85,15 +108,52 @@ router.post('/', async (req, res: Response) => {
   try {
     const parsedStartDate = new Date(startDate);
     const parsedEndDate = new Date(endDate);
-    const normalizedStatus = normalizeLeaseStatus(parsedStartDate, status);
+    const rent = Number(rentAmount);
+
+    if (!isValidDate(parsedStartDate) || !isValidDate(parsedEndDate)) {
+      res.status(400).json({ error: 'startDate and endDate must be valid dates' });
+      return;
+    }
+    if (!(rent > 0)) {
+      res.status(400).json({ error: 'rentAmount must be greater than 0' });
+      return;
+    }
+    if (toDateKey(parsedStartDate) >= toDateKey(parsedEndDate)) {
+      res.status(400).json({ error: 'startDate must be before endDate' });
+      return;
+    }
+
+    const nextStatus = status ?? deriveLeaseStatus(parsedStartDate, parsedEndDate);
+    const statusError = validateStatusForDates(nextStatus, parsedStartDate, parsedEndDate);
+    if (statusError) {
+      res.status(400).json({ error: statusError });
+      return;
+    }
 
     // Verify ownership
-    const property = await prisma.property.findFirst({
-      where: { id: propertyId, ownerId: user.id },
-    });
+    const [property, tenant] = await Promise.all([
+      prisma.property.findFirst({
+        where: { id: propertyId, ownerId: user.id },
+        select: { id: true },
+      }),
+      prisma.tenant.findFirst({
+        where: { id: tenantId, ownerId: user.id },
+        select: { id: true },
+      }),
+    ]);
 
     if (!property) {
       res.status(403).json({ error: 'Property not found or unauthorized' });
+      return;
+    }
+    if (!tenant) {
+      res.status(403).json({ error: 'Tenant not found or unauthorized' });
+      return;
+    }
+
+    const overlapsExisting = await hasPropertyOverlap(propertyId, parsedStartDate, parsedEndDate);
+    if (overlapsExisting) {
+      res.status(409).json({ error: 'Property already has a lease in this date range' });
       return;
     }
 
@@ -101,10 +161,10 @@ router.post('/', async (req, res: Response) => {
       data: {
         propertyId,
         tenantId,
-        rentAmount,
+        rentAmount: rent,
         startDate: parsedStartDate,
         endDate: parsedEndDate,
-        status: normalizedStatus,
+        status: nextStatus,
       },
       include: {
         property: { select: { id: true, name: true } },
@@ -119,7 +179,7 @@ router.post('/', async (req, res: Response) => {
       await prisma.payment.createMany({
         data: dueDates.map((d) => ({
           leaseId: lease.id,
-          amount: rentAmount,
+          amount: rent,
           dueDate: d,
           status: getInitialPaymentStatus(d),
         })),
@@ -128,8 +188,7 @@ router.post('/', async (req, res: Response) => {
 
     res.status(201).json({ ...lease, rentAmount: Number(lease.rentAmount) });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to create lease' });
+    handleLeaseWriteError(err, res, 'Failed to create lease');
   }
 });
 
@@ -171,7 +230,7 @@ router.get('/:id', async (req, res: Response) => {
 router.put('/:id', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
   const { id } = req.params;
-  const { rentAmount, startDate, endDate, status } = req.body;
+  const { propertyId, tenantId, rentAmount, startDate, endDate, status } = req.body;
 
   try {
     const existing = await prisma.lease.findFirst({
@@ -183,17 +242,76 @@ router.put('/:id', async (req, res: Response) => {
       return;
     }
 
-    const effectiveStartDate = startDate ? new Date(startDate) : existing.startDate;
-    const requestedStatus = status !== undefined ? status : existing.status;
-    const normalizedStatus = normalizeLeaseStatus(effectiveStartDate, requestedStatus);
+    const nextPropertyId = propertyId ?? existing.propertyId;
+    const nextTenantId = tenantId ?? existing.tenantId;
+    const nextStartDate = startDate ? new Date(startDate) : existing.startDate;
+    let nextEndDate = endDate ? new Date(endDate) : existing.endDate;
+    const nextRentAmount = rentAmount !== undefined ? Number(rentAmount) : Number(existing.rentAmount);
+
+    if (!isValidDate(nextStartDate) || !isValidDate(nextEndDate)) {
+      res.status(400).json({ error: 'startDate and endDate must be valid dates' });
+      return;
+    }
+    if (!(nextRentAmount > 0)) {
+      res.status(400).json({ error: 'rentAmount must be greater than 0' });
+      return;
+    }
+
+    const closingNow = status === 'closed' && existing.status !== 'closed';
+    if (closingNow) {
+      const today = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
+      if (toDateKey(today) < toDateKey(nextEndDate)) {
+        nextEndDate = today;
+      }
+    }
+
+    if (toDateKey(nextStartDate) >= toDateKey(nextEndDate)) {
+      res.status(400).json({ error: 'startDate must be before endDate' });
+      return;
+    }
+
+    const nextStatus = status ?? (startDate || endDate ? deriveLeaseStatus(nextStartDate, nextEndDate) : existing.status);
+    const statusError = validateStatusForDates(nextStatus, nextStartDate, nextEndDate);
+    if (statusError) {
+      res.status(400).json({ error: statusError });
+      return;
+    }
+
+    const [property, tenant] = await Promise.all([
+      prisma.property.findFirst({
+        where: { id: nextPropertyId, ownerId: user.id },
+        select: { id: true },
+      }),
+      prisma.tenant.findFirst({
+        where: { id: nextTenantId, ownerId: user.id },
+        select: { id: true },
+      }),
+    ]);
+
+    if (!property) {
+      res.status(403).json({ error: 'Property not found or unauthorized' });
+      return;
+    }
+    if (!tenant) {
+      res.status(403).json({ error: 'Tenant not found or unauthorized' });
+      return;
+    }
+
+    const overlapsExisting = await hasPropertyOverlap(nextPropertyId, nextStartDate, nextEndDate, id);
+    if (overlapsExisting) {
+      res.status(409).json({ error: 'Property already has a lease in this date range' });
+      return;
+    }
 
     const lease = await prisma.lease.update({
       where: { id },
       data: {
-        ...(rentAmount !== undefined ? { rentAmount } : {}),
-        ...(startDate ? { startDate: effectiveStartDate } : {}),
-        ...(endDate ? { endDate: new Date(endDate) } : {}),
-        ...(status !== undefined || startDate ? { status: normalizedStatus } : {}),
+        propertyId: nextPropertyId,
+        tenantId: nextTenantId,
+        rentAmount: nextRentAmount,
+        startDate: nextStartDate,
+        endDate: nextEndDate,
+        status: nextStatus,
       },
       include: {
         property: { select: { id: true, name: true } },
@@ -202,17 +320,19 @@ router.put('/:id', async (req, res: Response) => {
     });
 
     // Sync pending payments to new rent amount (paid/overdue keep their original amount)
-    if (rentAmount !== undefined) {
+    if (rentAmount !== undefined || status === 'closed') {
       await prisma.payment.updateMany({
         where: { leaseId: id, status: 'pending' },
-        data: { amount: rentAmount },
+        data: {
+          ...(rentAmount !== undefined ? { amount: nextRentAmount } : {}),
+          ...(status === 'closed' ? { status: 'expired' } : {}),
+        },
       });
     }
 
     res.json({ ...lease, rentAmount: Number(lease.rentAmount) });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to update lease' });
+    handleLeaseWriteError(err, res, 'Failed to update lease');
   }
 });
 

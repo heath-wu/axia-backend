@@ -5,9 +5,11 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
+    "test": "tsx --test test/**/*.test.ts",
     "start": "node dist/server.js",
     "postinstall": "prisma generate",
-    "db:push": "prisma db push && npm run db:constraints",
+    "db:push": "prisma db push && npm run db:backfill-tenants && npm run db:constraints",
+    "db:backfill-tenants": "tsx scripts/backfill-tenant-ownership.ts",
     "db:constraints": "tsx scripts/apply-db-constraints.ts",
     "db:seed": "tsx scripts/seed.ts"
   },

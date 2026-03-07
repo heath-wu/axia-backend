@@ -5,9 +5,11 @@ import { AuthenticatedRequest } from '../middleware/auth';
 const router = Router();
 
 // GET /tenants — list all tenants
-router.get('/', async (_req, res: Response) => {
+router.get('/', async (req, res: Response) => {
+  const { user } = req as AuthenticatedRequest;
   try {
     const tenants = await prisma.tenant.findMany({
+      where: { ownerId: user.id },
       include: {
         leases: {
           where: { status: 'active' },
@@ -42,6 +44,7 @@ router.get('/', async (_req, res: Response) => {
 
 // POST /tenants — create a tenant
 router.post('/', async (req, res: Response) => {
+  const { user } = req as AuthenticatedRequest;
   const { name, email, phone } = req.body;
 
   if (!name || !email) {
@@ -51,7 +54,7 @@ router.post('/', async (req, res: Response) => {
 
   try {
     const tenant = await prisma.tenant.create({
-      data: { name, email, phone: phone || null },
+      data: { ownerId: user.id, name, email, phone: phone || null },
     });
     res.status(201).json(tenant);
   } catch (err) {
@@ -62,11 +65,12 @@ router.post('/', async (req, res: Response) => {
 
 // GET /tenants/:id
 router.get('/:id', async (req, res: Response) => {
+  const { user } = req as unknown as AuthenticatedRequest;
   const { id } = req.params;
 
   try {
-    const tenant = await prisma.tenant.findUnique({
-      where: { id },
+    const tenant = await prisma.tenant.findFirst({
+      where: { id, ownerId: user.id },
       include: {
         leases: {
           include: {
@@ -92,10 +96,20 @@ router.get('/:id', async (req, res: Response) => {
 
 // PUT /tenants/:id
 router.put('/:id', async (req, res: Response) => {
+  const { user } = req as unknown as AuthenticatedRequest;
   const { id } = req.params;
   const { name, email, phone } = req.body;
 
   try {
+    const existing = await prisma.tenant.findFirst({
+      where: { id, ownerId: user.id },
+      select: { id: true },
+    });
+    if (!existing) {
+      res.status(404).json({ error: 'Tenant not found' });
+      return;
+    }
+
     const tenant = await prisma.tenant.update({
       where: { id },
       data: { name, email, phone: phone || null },
@@ -109,21 +123,22 @@ router.put('/:id', async (req, res: Response) => {
 
 // DELETE /tenants/:id
 router.delete('/:id', async (req, res: Response) => {
+  const { user } = req as unknown as AuthenticatedRequest;
   const { id } = req.params;
 
   try {
-    const existing = await prisma.tenant.findUnique({ where: { id } });
+    const existing = await prisma.tenant.findFirst({ where: { id, ownerId: user.id } });
     if (!existing) {
       res.status(404).json({ error: 'Tenant not found' });
       return;
     }
 
-    const activeLeases = await prisma.lease.count({
-      where: { tenantId: id, status: 'active' },
+    const leaseCount = await prisma.lease.count({
+      where: { tenantId: id },
     });
 
-    if (activeLeases > 0) {
-      res.status(400).json({ error: 'Cannot delete tenant with active leases' });
+    if (leaseCount > 0) {
+      res.status(400).json({ error: 'Cannot delete tenant with existing leases' });
       return;
     }
 
