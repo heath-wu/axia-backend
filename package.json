@@ -2,9 +2,6 @@
   "name": "axia-backend",
   "version": "1.0.0",
   "private": true,
-  "engines": {
-    "node": "22.x"
-  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
