@@ -2,11 +2,7 @@
   "version": 2,
   "functions": {
     "api/index.ts": {
-      "runtime": "nodejs22.x",
-      "includeFiles": [
-        "prisma/**",
-        "node_modules/.prisma/client/**"
-      ]
+      "runtime": "nodejs22.x"
     }
   },
   "rewrites": [
