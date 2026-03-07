@@ -23,6 +23,10 @@ app.use(
 app.use(express.json());
 
 // Public routes (no auth required)
+app.get('/', (_req, res) => {
+  res.json({ service: 'axia-backend', status: 'ok' });
+});
+
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
