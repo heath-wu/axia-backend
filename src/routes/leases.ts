@@ -190,4 +190,32 @@ router.put('/:id', async (req, res: Response) => {
   }
 });
 
+// DELETE /leases/:id
+router.delete('/:id', async (req, res: Response) => {
+  const { user } = req as unknown as AuthenticatedRequest;
+  const { id } = req.params;
+
+  try {
+    const existing = await prisma.lease.findFirst({
+      where: { id, property: { ownerId: user.id } },
+      select: { id: true },
+    });
+
+    if (!existing) {
+      res.status(404).json({ error: 'Lease not found' });
+      return;
+    }
+
+    await prisma.$transaction([
+      prisma.payment.deleteMany({ where: { leaseId: id } }),
+      prisma.lease.delete({ where: { id } }),
+    ]);
+
+    res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete lease' });
+  }
+});
+
 export default router;
