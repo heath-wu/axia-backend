@@ -28,6 +28,24 @@ function getInitialPaymentStatus(dueDate: Date, now = new Date()) {
   return dueKey < todayKey ? 'overdue' : 'pending';
 }
 
+function toDateKey(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function normalizeLeaseStatus(startDate: Date, requestedStatus?: string, now = new Date()) {
+  const desiredStatus = requestedStatus ?? 'active';
+  const todayKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
+    .toISOString()
+    .slice(0, 10);
+  const startKey = toDateKey(startDate);
+
+  if (desiredStatus === 'active' && startKey > todayKey) {
+    return 'pending';
+  }
+
+  return desiredStatus;
+}
+
 // GET /leases — list all leases for authenticated user's properties
 router.get('/', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
@@ -65,6 +83,10 @@ router.post('/', async (req, res: Response) => {
   }
 
   try {
+    const parsedStartDate = new Date(startDate);
+    const parsedEndDate = new Date(endDate);
+    const normalizedStatus = normalizeLeaseStatus(parsedStartDate, status);
+
     // Verify ownership
     const property = await prisma.property.findFirst({
       where: { id: propertyId, ownerId: user.id },
@@ -80,9 +102,9 @@ router.post('/', async (req, res: Response) => {
         propertyId,
         tenantId,
         rentAmount,
-        startDate: new Date(startDate),
-        endDate: new Date(endDate),
-        status: status || 'active',
+        startDate: parsedStartDate,
+        endDate: parsedEndDate,
+        status: normalizedStatus,
       },
       include: {
         property: { select: { id: true, name: true } },
@@ -161,13 +183,17 @@ router.put('/:id', async (req, res: Response) => {
       return;
     }
 
+    const effectiveStartDate = startDate ? new Date(startDate) : existing.startDate;
+    const requestedStatus = status !== undefined ? status : existing.status;
+    const normalizedStatus = normalizeLeaseStatus(effectiveStartDate, requestedStatus);
+
     const lease = await prisma.lease.update({
       where: { id },
       data: {
         ...(rentAmount !== undefined ? { rentAmount } : {}),
-        ...(startDate ? { startDate: new Date(startDate) } : {}),
+        ...(startDate ? { startDate: effectiveStartDate } : {}),
         ...(endDate ? { endDate: new Date(endDate) } : {}),
-        ...(status ? { status } : {}),
+        ...(status !== undefined || startDate ? { status: normalizedStatus } : {}),
       },
       include: {
         property: { select: { id: true, name: true } },

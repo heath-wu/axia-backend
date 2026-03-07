@@ -7,7 +7,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "postinstall": "prisma generate",
-    "db:push": "prisma db push",
+    "db:push": "prisma db push && npm run db:constraints",
+    "db:constraints": "tsx scripts/apply-db-constraints.ts",
     "db:seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
