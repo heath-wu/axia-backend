@@ -1,16 +1,18 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "dist/server.js",
-      "use": "@vercel/node",
-      "config": { "includeFiles": ["dist/**"] }
+  "functions": {
+    "api/index.ts": {
+      "runtime": "nodejs22.x",
+      "includeFiles": [
+        "prisma/**",
+        "node_modules/.prisma/client/**"
+      ]
     }
-  ],
-  "routes": [
+  },
+  "rewrites": [
     {
-      "src": "/(.*)",
-      "dest": "dist/server.js"
+      "source": "/(.*)",
+      "destination": "/api/index"
     }
   ]
 }
