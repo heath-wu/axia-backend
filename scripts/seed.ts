@@ -5,6 +5,44 @@ dotenv.config();
 
 const prisma = new PrismaClient();
 
+function startOfMonth(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function generateMonthlyDueDates(startDate: Date, endDate: Date) {
+  const dueDates: Date[] = [];
+  let cursor = startOfMonth(startDate);
+
+  while (cursor < endDate) {
+    dueDates.push(new Date(cursor));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+
+  return dueDates;
+}
+
+function formatYearMonth(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+function getSeedPaymentStatus(dueDate: Date, now = new Date()) {
+  const dueKey = dueDate.toISOString().slice(0, 10);
+  const monthStartKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1)).toISOString().slice(0, 10);
+  const todayKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
+    .toISOString()
+    .slice(0, 10);
+
+  if (dueKey < monthStartKey) return 'paid';
+  if (dueKey < todayKey) return 'overdue';
+  return 'pending';
+}
+
+function createUtcDate(year: number, monthIndex: number, day: number) {
+  return new Date(Date.UTC(year, monthIndex, day));
+}
+
 async function resolveUserId(): Promise<string> {
   // Fast path: UUID provided directly (bypasses Supabase Auth API)
   if (process.env.DEMO_USER_UUID) {
@@ -55,6 +93,25 @@ async function seed() {
     create: { id: userId, email: 'demo@axia.com', name: 'Demo Landlord' },
   });
   console.log(`✅ User row upserted: ${user.id}`);
+
+  // Cleanup prior seed data for this user so reseeding remains deterministic.
+  await prisma.payment.deleteMany({
+    where: { lease: { property: { ownerId: user.id } } },
+  });
+  await prisma.lease.deleteMany({
+    where: { property: { ownerId: user.id } },
+  });
+  await prisma.property.deleteMany({
+    where: { ownerId: user.id },
+  });
+  await prisma.tenant.deleteMany({
+    where: {
+      id: {
+        startsWith: 'seed-tenant-',
+      },
+    },
+  });
+  console.log('✅ Existing seed-linked data cleaned');
 
   // 3 properties
   console.log('Creating properties...');
@@ -109,8 +166,8 @@ async function seed() {
       propertyId: properties[0].id,
       tenantId: tenants[0].id,
       rentAmount: 1850,
-      startDate: new Date(now.getFullYear() - 1, 0, 1),
-      endDate: new Date(now.getFullYear() + 1, 0, 1),
+      startDate: createUtcDate(now.getFullYear() - 1, 0, 1),
+      endDate: createUtcDate(now.getFullYear() + 1, 0, 1),
       status: 'active',
     },
     {
@@ -118,8 +175,8 @@ async function seed() {
       propertyId: properties[0].id,
       tenantId: tenants[1].id,
       rentAmount: 1750,
-      startDate: new Date(now.getFullYear() - 1, 3, 1),
-      endDate: new Date(now.getFullYear() + 1, 3, 1),
+      startDate: createUtcDate(now.getFullYear() - 1, 3, 1),
+      endDate: createUtcDate(now.getFullYear() + 1, 3, 1),
       status: 'active',
     },
     {
@@ -127,8 +184,8 @@ async function seed() {
       propertyId: properties[1].id,
       tenantId: tenants[2].id,
       rentAmount: 2200,
-      startDate: new Date(now.getFullYear(), 0, 1),
-      endDate: new Date(now.getFullYear() + 1, 0, 1),
+      startDate: createUtcDate(now.getFullYear(), 0, 1),
+      endDate: createUtcDate(now.getFullYear() + 1, 0, 1),
       status: 'active',
     },
     {
@@ -136,8 +193,8 @@ async function seed() {
       propertyId: properties[2].id,
       tenantId: tenants[3].id,
       rentAmount: 1950,
-      startDate: new Date(now.getFullYear() + 1, 0, 1),
-      endDate: new Date(now.getFullYear() + 2, 0, 1),
+      startDate: createUtcDate(now.getFullYear() + 1, 0, 1),
+      endDate: createUtcDate(now.getFullYear() + 2, 0, 1),
       status: 'pending',
     },
     {
@@ -145,8 +202,8 @@ async function seed() {
       propertyId: properties[2].id,
       tenantId: tenants[4].id,
       rentAmount: 1600,
-      startDate: new Date(now.getFullYear() - 2, 0, 1),
-      endDate: new Date(now.getFullYear() - 1, 0, 1),
+      startDate: createUtcDate(now.getFullYear() - 2, 0, 1),
+      endDate: createUtcDate(now.getFullYear() - 1, 0, 1),
       status: 'expired',
     },
   ];
@@ -162,28 +219,25 @@ async function seed() {
   );
   console.log(`✅ ${leases.length} leases created`);
 
-  // 3 payments per lease
+  // Monthly payments for each lease term
   console.log('Creating payments...');
-  const pastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  const thisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-
+  let paymentCount = 0;
   for (const lease of leases) {
-    await Promise.all(
-      [
-        { id: `seed-pay-${lease.id}-1`, dueDate: pastMonth, status: 'paid' },
-        { id: `seed-pay-${lease.id}-2`, dueDate: thisMonth, status: 'overdue' },
-        { id: `seed-pay-${lease.id}-3`, dueDate: nextMonth, status: 'pending' },
-      ].map((p) =>
-        prisma.payment.upsert({
-          where: { id: p.id },
-          update: {},
-          create: { ...p, leaseId: lease.id, amount: lease.rentAmount },
-        })
-      )
-    );
+    const dueDates = generateMonthlyDueDates(lease.startDate, lease.endDate);
+    const payments = dueDates.map((dueDate) => ({
+      id: `seed-pay-${lease.id}-${formatYearMonth(dueDate)}`,
+      leaseId: lease.id,
+      amount: lease.rentAmount,
+      dueDate,
+      status: getSeedPaymentStatus(dueDate, now),
+    }));
+
+    if (payments.length > 0) {
+      await prisma.payment.createMany({ data: payments });
+      paymentCount += payments.length;
+    }
   }
-  console.log(`✅ ${leases.length * 3} payments created`);
+  console.log(`✅ ${paymentCount} payments created`);
 
   console.log('\n✅ Seed complete!');
   console.log('Demo credentials: demo@axia.com / AxiaDemo2024!');

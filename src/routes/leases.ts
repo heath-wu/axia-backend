@@ -4,6 +4,30 @@ import { AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
 
+function startOfMonth(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function generateMonthlyDueDates(startDate: Date, endDate: Date) {
+  const dueDates: Date[] = [];
+  let cursor = startOfMonth(startDate);
+
+  while (cursor < endDate) {
+    dueDates.push(new Date(cursor));
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  }
+
+  return dueDates;
+}
+
+function getInitialPaymentStatus(dueDate: Date, now = new Date()) {
+  const dueKey = dueDate.toISOString().slice(0, 10);
+  const todayKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
+    .toISOString()
+    .slice(0, 10);
+  return dueKey < todayKey ? 'overdue' : 'pending';
+}
+
 // GET /leases — list all leases for authenticated user's properties
 router.get('/', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
@@ -66,22 +90,19 @@ router.post('/', async (req, res: Response) => {
       },
     });
 
-    // Auto-generate 3 payment rows for the new lease
-    const now = new Date();
-    const dueDates = [
-      new Date(now.getFullYear(), now.getMonth(), 1),
-      new Date(now.getFullYear(), now.getMonth() + 1, 1),
-      new Date(now.getFullYear(), now.getMonth() + 2, 1),
-    ];
+    // Auto-generate monthly payment rows for the entire lease term.
+    const dueDates = generateMonthlyDueDates(lease.startDate, lease.endDate);
 
-    await prisma.payment.createMany({
-      data: dueDates.map((d) => ({
-        leaseId: lease.id,
-        amount: rentAmount,
-        dueDate: d,
-        status: 'pending',
-      })),
-    });
+    if (dueDates.length > 0) {
+      await prisma.payment.createMany({
+        data: dueDates.map((d) => ({
+          leaseId: lease.id,
+          amount: rentAmount,
+          dueDate: d,
+          status: getInitialPaymentStatus(d),
+        })),
+      });
+    }
 
     res.status(201).json({ ...lease, rentAmount: Number(lease.rentAmount) });
   } catch (err) {
