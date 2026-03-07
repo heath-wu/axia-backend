@@ -6,6 +6,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
+    "postinstall": "prisma generate",
     "db:push": "prisma db push",
     "db:seed": "tsx scripts/seed.ts"
   },
