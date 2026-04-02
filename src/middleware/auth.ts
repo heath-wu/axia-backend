@@ -17,6 +17,40 @@ export interface AuthenticatedRequest extends Request {
   };
 }
 
+type CachedUser = {
+  user: {
+    id: string;
+    email: string;
+    name: string | null;
+  };
+  expiresAt: number;
+};
+
+const USER_CACHE_TTL_MS = 5 * 60 * 1000;
+const userCache = new Map<string, CachedUser>();
+
+function getCachedUser(cacheKey: string) {
+  const cached = userCache.get(cacheKey);
+
+  if (!cached) {
+    return null;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    userCache.delete(cacheKey);
+    return null;
+  }
+
+  return cached.user;
+}
+
+function setCachedUser(cacheKey: string, user: AuthenticatedRequest['user']) {
+  userCache.set(cacheKey, {
+    user,
+    expiresAt: Date.now() + USER_CACHE_TTL_MS,
+  });
+}
+
 export async function authMiddleware(
   req: Request,
   res: Response,
@@ -32,16 +66,39 @@ export async function authMiddleware(
 
   try {
     const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET!) as JwtPayload;
+    const cacheKey = `${payload.sub}:${payload.email}`;
+    const cachedUser = getCachedUser(cacheKey);
 
-    const user = await prisma.user.upsert({
+    if (cachedUser) {
+      (req as AuthenticatedRequest).user = cachedUser;
+      next();
+      return;
+    }
+
+    let user = await prisma.user.findUnique({
       where: { id: payload.sub },
-      update: {},
-      create: {
-        id: payload.sub,
-        email: payload.email,
+      select: {
+        id: true,
+        email: true,
+        name: true,
       },
     });
 
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          id: payload.sub,
+          email: payload.email,
+        },
+        select: {
+          id: true,
+          email: true,
+          name: true,
+        },
+      });
+    }
+
+    setCachedUser(cacheKey, user);
     (req as AuthenticatedRequest).user = user;
     next();
   } catch {

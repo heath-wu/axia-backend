@@ -1,4 +1,4 @@
-export const LEASE_STATUSES = ['pending', 'active', 'expired', 'closed'] as const;
+export const LEASE_STATUSES = ['pending', 'signed', 'active', 'expired', 'closed'] as const;
 export type LeaseStatus = (typeof LEASE_STATUSES)[number];
 
 function toUtcDateOnly(date: Date) {
@@ -30,6 +30,24 @@ export function deriveLeaseStatus(startDate: Date, endDate: Date, now = new Date
   return 'active';
 }
 
+export function normalizeLeaseStatus(
+  status: string,
+  startDate: Date,
+  endDate: Date,
+  now = new Date()
+): LeaseStatus {
+  if (status === 'closed') return 'closed';
+
+  const startKey = toDateKey(startDate);
+  const endKey = toDateKey(endDate);
+  const todayKey = toDateKey(now);
+
+  if (todayKey >= endKey) return 'expired';
+  if (todayKey >= startKey) return 'active';
+  if (status === 'signed') return 'signed';
+  return 'pending';
+}
+
 export function validateStatusForDates(
   status: string,
   startDate: Date,
@@ -42,6 +60,10 @@ export function validateStatusForDates(
 
   if (status === 'active' && !isActiveWindow(startDate, endDate, now)) {
     return 'Lease can be active only between startDate (inclusive) and endDate (exclusive)';
+  }
+
+  if (status === 'signed' && toDateKey(now) >= toDateKey(endDate)) {
+    return 'Lease cannot remain signed on/after endDate';
   }
 
   if (status === 'expired' && toDateKey(now) < toDateKey(endDate)) {

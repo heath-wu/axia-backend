@@ -11,7 +11,8 @@
     "db:push": "prisma db push && npm run db:backfill-tenants && npm run db:constraints",
     "db:backfill-tenants": "tsx scripts/backfill-tenant-ownership.ts",
     "db:constraints": "tsx scripts/apply-db-constraints.ts",
-    "db:seed": "tsx scripts/seed.ts"
+    "db:seed": "tsx scripts/seed.ts",
+    "db:resync-lease-payments": "tsx scripts/resync-lease-payments.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

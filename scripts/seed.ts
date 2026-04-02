@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
+import { derivePaymentStatus } from '../src/lib/payment-status';
 dotenv.config();
 
 const prisma = new PrismaClient({
@@ -33,16 +34,58 @@ function formatYearMonth(date: Date) {
   return `${year}-${month}`;
 }
 
-function getSeedPaymentStatus(dueDate: Date, now = new Date()) {
-  const dueKey = dueDate.toISOString().slice(0, 10);
-  const monthStartKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1)).toISOString().slice(0, 10);
-  const todayKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
-    .toISOString()
-    .slice(0, 10);
+function createPropertyImageDataUrl(name: string, accent: string) {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+      <defs>
+        <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#eff6ff" />
+          <stop offset="100%" stop-color="#dbeafe" />
+        </linearGradient>
+      </defs>
+      <rect width="1200" height="800" fill="url(#sky)" />
+      <rect x="0" y="620" width="1200" height="180" fill="#d1d5db" />
+      <rect x="220" y="160" width="760" height="470" rx="26" fill="#ffffff" stroke="#cbd5e1" stroke-width="8" />
+      <rect x="220" y="160" width="760" height="86" rx="26" fill="${accent}" />
+      <rect x="310" y="300" width="160" height="220" rx="14" fill="#dbeafe" />
+      <rect x="520" y="300" width="160" height="220" rx="14" fill="#dbeafe" />
+      <rect x="730" y="300" width="160" height="220" rx="14" fill="#dbeafe" />
+      <rect x="525" y="470" width="150" height="160" rx="20" fill="#334155" />
+      <text x="600" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="44" font-weight="700" fill="#0f172a">
+        ${name}
+      </text>
+    </svg>
+  `.trim();
 
-  if (dueKey < monthStartKey) return 'paid';
-  if (dueKey < todayKey) return 'overdue';
-  return 'pending';
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+function getSeedPaymentSnapshot(dueDate: Date, now = new Date()) {
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const previousMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const dueKey = dueDate.toISOString().slice(0, 10);
+  const previousMonthKey = previousMonthStart.toISOString().slice(0, 10);
+  const monthStartKey = monthStart.toISOString().slice(0, 10);
+
+  if (dueKey === previousMonthKey) {
+    const paidAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 5));
+    return {
+      paidAt,
+      status: derivePaymentStatus(dueDate, paidAt, now),
+    };
+  }
+
+  if (dueKey < monthStartKey) {
+    return {
+      paidAt: dueDate,
+      status: derivePaymentStatus(dueDate, dueDate, now),
+    };
+  }
+
+  return {
+    paidAt: null,
+    status: derivePaymentStatus(dueDate, null, now),
+  };
 }
 
 function createUtcDate(year: number, monthIndex: number, day: number) {
@@ -122,16 +165,28 @@ async function seed() {
   // 3 properties
   console.log('Creating properties...');
   const propertiesData = [
-    { name: 'Maple Street Apartments', address: '142 Maple St, Austin, TX 78701' },
-    { name: 'Oak Grove Townhomes', address: '891 Oak Grove Blvd, Austin, TX 78745' },
-    { name: 'River View Condos', address: '2204 Riverside Dr, Austin, TX 78741' },
+    {
+      name: 'Maple Street Apartments',
+      address: '142 Maple St, Austin, TX 78701',
+      imageUrl: createPropertyImageDataUrl('Maple Street Apartments', '#2563eb'),
+    },
+    {
+      name: 'Oak Grove Townhomes',
+      address: '891 Oak Grove Blvd, Austin, TX 78745',
+      imageUrl: createPropertyImageDataUrl('Oak Grove Townhomes', '#0f766e'),
+    },
+    {
+      name: 'River View Condos',
+      address: '2204 Riverside Dr, Austin, TX 78741',
+      imageUrl: createPropertyImageDataUrl('River View Condos', '#7c3aed'),
+    },
   ];
 
   const properties = await Promise.all(
     propertiesData.map((p) =>
       prisma.property.upsert({
         where: { id: `seed-prop-${p.name.toLowerCase().replace(/\s+/g, '-')}` },
-        update: {},
+        update: p,
         create: {
           id: `seed-prop-${p.name.toLowerCase().replace(/\s+/g, '-')}`,
           ...p,
@@ -175,6 +230,9 @@ async function seed() {
       startDate: createUtcDate(now.getFullYear(), 0, 1),
       endDate: createUtcDate(now.getFullYear() + 1, 0, 1),
       status: 'active',
+      concessions: 'Waived application fee',
+      fees: 'Parking $75/month',
+      specialTerms: 'Resident may renew with 60 days notice.',
     },
     {
       id: 'seed-lease-2',
@@ -184,6 +242,7 @@ async function seed() {
       startDate: createUtcDate(now.getFullYear() - 1, 0, 1),
       endDate: createUtcDate(now.getFullYear(), 0, 1),
       status: 'expired',
+      concessions: 'First month prorated',
     },
     {
       id: 'seed-lease-3',
@@ -193,6 +252,8 @@ async function seed() {
       startDate: createUtcDate(now.getFullYear() - 1, 6, 1),
       endDate: createUtcDate(now.getFullYear(), 6, 1),
       status: 'active',
+      fees: 'Pet rent $35/month',
+      specialTerms: 'Includes two reserved parking spaces.',
     },
     {
       id: 'seed-lease-4',
@@ -201,7 +262,9 @@ async function seed() {
       rentAmount: 1950,
       startDate: createUtcDate(now.getFullYear() + 1, 0, 1),
       endDate: createUtcDate(now.getFullYear() + 2, 0, 1),
-      status: 'pending',
+      status: 'signed',
+      concessions: 'Half off first month rent',
+      fees: 'Storage locker $25/month',
     },
     {
       id: 'seed-lease-5',
@@ -218,7 +281,7 @@ async function seed() {
     leasesData.map((l) =>
       prisma.lease.upsert({
         where: { id: l.id },
-        update: {},
+        update: l,
         create: l,
       })
     )
@@ -230,13 +293,17 @@ async function seed() {
   let paymentCount = 0;
   for (const lease of leases) {
     const dueDates = generateMonthlyDueDates(lease.startDate, lease.endDate);
-    const payments = dueDates.map((dueDate) => ({
-      id: `seed-pay-${lease.id}-${formatYearMonth(dueDate)}`,
-      leaseId: lease.id,
-      amount: lease.rentAmount,
-      dueDate,
-      status: getSeedPaymentStatus(dueDate, now),
-    }));
+    const payments = dueDates.map((dueDate) => {
+      const snapshot = getSeedPaymentSnapshot(dueDate, now);
+      return {
+        id: `seed-pay-${lease.id}-${formatYearMonth(dueDate)}`,
+        leaseId: lease.id,
+        amount: lease.rentAmount,
+        dueDate,
+        paidAt: snapshot.paidAt,
+        status: snapshot.status,
+      };
+    });
 
     if (payments.length > 0) {
       await prisma.payment.createMany({ data: payments });

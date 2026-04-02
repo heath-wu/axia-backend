@@ -31,10 +31,18 @@ async function applyConstraints() {
         CHECK (rent_amount > 0);
       END IF;
 
-      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'leases_valid_status') THEN
-        ALTER TABLE leases
-        ADD CONSTRAINT leases_valid_status
-        CHECK (status IN ('pending', 'active', 'expired', 'closed'));
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'leases_valid_status') THEN
+        ALTER TABLE leases DROP CONSTRAINT leases_valid_status;
+      END IF;
+
+      ALTER TABLE leases
+      ADD CONSTRAINT leases_valid_status
+      CHECK (status IN ('pending', 'signed', 'active', 'expired', 'closed'));
+
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'payments_valid_status') THEN
+        ALTER TABLE payments
+        ADD CONSTRAINT payments_valid_status
+        CHECK (status IN ('upcoming', 'paid', 'late_paid', 'late_unpaid'));
       END IF;
     END
     $$;
@@ -58,6 +66,11 @@ async function applyConstraints() {
 
       IF NEW.status = 'active' AND (CURRENT_DATE < NEW.start_date OR CURRENT_DATE >= NEW.end_date) THEN
         RAISE EXCEPTION 'Lease cannot be active outside its active window.'
+          USING ERRCODE = '23514';
+      END IF;
+
+      IF NEW.status = 'signed' AND CURRENT_DATE >= NEW.end_date THEN
+        RAISE EXCEPTION 'Lease cannot remain signed on/after end_date.'
           USING ERRCODE = '23514';
       END IF;
 

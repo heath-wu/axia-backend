@@ -1,38 +1,63 @@
 import { Router, Response } from 'express';
 import { Prisma } from '@prisma/client';
+import { getCachedValue, invalidateOwnerCache, setCachedValue } from '../lib/demo-cache';
 import { prisma } from '../lib/prisma';
+import { syncLeasePayments } from '../lib/sync-lease-payments';
 import { AuthenticatedRequest } from '../middleware/auth';
 import {
-  deriveLeaseStatus,
   isValidDate,
-  validateStatusForDates,
+  normalizeLeaseStatus,
   toDateKey,
+  validateStatusForDates,
 } from '../lib/lease-validation';
+import { normalizePaymentStatus } from '../lib/payment-status';
 
 const router = Router();
 
-function startOfMonth(date: Date) {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+function cleanOptionalText(value: unknown) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
-function generateMonthlyDueDates(startDate: Date, endDate: Date) {
-  const dueDates: Date[] = [];
-  let cursor = startOfMonth(startDate);
+function cleanOptionalUrl(value: unknown) {
+  const trimmed = cleanOptionalText(value);
+  if (!trimmed) return null;
 
-  while (cursor < endDate) {
-    dueDates.push(new Date(cursor));
-    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
   }
-
-  return dueDates;
 }
 
-function getInitialPaymentStatus(dueDate: Date, now = new Date()) {
-  const dueKey = dueDate.toISOString().slice(0, 10);
-  const todayKey = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
-    .toISOString()
-    .slice(0, 10);
-  return dueKey < todayKey ? 'overdue' : 'pending';
+function mapLease(lease: {
+  rentAmount: Prisma.Decimal;
+  startDate: Date;
+  endDate: Date;
+  status: string;
+  payments?: Array<{
+    amount: Prisma.Decimal;
+    dueDate: Date;
+    status: string;
+    paidAt: Date | null;
+  }>;
+  [key: string]: unknown;
+}) {
+  return {
+    ...lease,
+    rentAmount: Number(lease.rentAmount),
+    status: normalizeLeaseStatus(lease.status, lease.startDate, lease.endDate),
+    payments: lease.payments?.map((payment) => ({
+      ...payment,
+      amount: Number(payment.amount),
+      status: normalizePaymentStatus(payment),
+    })),
+  };
 }
 
 async function hasPropertyOverlap(
@@ -69,12 +94,18 @@ function handleLeaseWriteError(err: unknown, res: Response, fallbackMessage: str
   return true;
 }
 
-// GET /leases — list all leases for authenticated user's properties
 router.get('/', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
   const { property_id, tenant_id } = req.query;
+  const cacheKey = `${user.id}:leases:${String(property_id || '')}:${String(tenant_id || '')}`;
 
   try {
+    const cached = getCachedValue(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const leases = await prisma.lease.findMany({
       where: {
         property: { ownerId: user.id },
@@ -82,25 +113,44 @@ router.get('/', async (req, res: Response) => {
         ...(tenant_id ? { tenantId: tenant_id as string } : {}),
       },
       include: {
-        property: { select: { id: true, name: true, address: true } },
+        property: { select: { id: true, name: true, address: true, imageUrl: true } },
         tenant: { select: { id: true, name: true, email: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    res.json(leases.map((l) => ({ ...l, rentAmount: Number(l.rentAmount) })));
+    const payload = leases.map((lease) => mapLease(lease));
+    setCachedValue(cacheKey, payload);
+    res.json(payload);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch leases' });
   }
 });
 
-// POST /leases — create a lease
 router.post('/', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
-  const { propertyId, tenantId, rentAmount, startDate, endDate, status } = req.body;
+  const {
+    propertyId,
+    tenantId,
+    rentAmount,
+    startDate,
+    endDate,
+    specialTerms,
+    concessions,
+    fees,
+    leaseDocumentUrl,
+    status,
+  } = req.body;
 
-  if (!propertyId || !tenantId || !rentAmount || !startDate || !endDate) {
+  if (
+    !propertyId ||
+    !tenantId ||
+    rentAmount === undefined ||
+    rentAmount === null ||
+    !startDate ||
+    !endDate
+  ) {
     res.status(400).json({ error: 'propertyId, tenantId, rentAmount, startDate, endDate are required' });
     return;
   }
@@ -109,6 +159,7 @@ router.post('/', async (req, res: Response) => {
     const parsedStartDate = new Date(startDate);
     const parsedEndDate = new Date(endDate);
     const rent = Number(rentAmount);
+    const nextStatus = typeof status === 'string' ? status : 'pending';
 
     if (!isValidDate(parsedStartDate) || !isValidDate(parsedEndDate)) {
       res.status(400).json({ error: 'startDate and endDate must be valid dates' });
@@ -123,14 +174,12 @@ router.post('/', async (req, res: Response) => {
       return;
     }
 
-    const nextStatus = status ?? deriveLeaseStatus(parsedStartDate, parsedEndDate);
     const statusError = validateStatusForDates(nextStatus, parsedStartDate, parsedEndDate);
     if (statusError) {
       res.status(400).json({ error: statusError });
       return;
     }
 
-    // Verify ownership
     const [property, tenant] = await Promise.all([
       prisma.property.findFirst({
         where: { id: propertyId, ownerId: user.id },
@@ -147,7 +196,7 @@ router.post('/', async (req, res: Response) => {
       return;
     }
     if (!tenant) {
-      res.status(403).json({ error: 'Tenant not found or unauthorized' });
+      res.status(403).json({ error: 'Resident not found or unauthorized' });
       return;
     }
 
@@ -165,34 +214,26 @@ router.post('/', async (req, res: Response) => {
         startDate: parsedStartDate,
         endDate: parsedEndDate,
         status: nextStatus,
+        specialTerms: cleanOptionalText(specialTerms),
+        concessions: cleanOptionalText(concessions),
+        fees: cleanOptionalText(fees),
+        leaseDocumentUrl: cleanOptionalUrl(leaseDocumentUrl),
       },
       include: {
-        property: { select: { id: true, name: true } },
-        tenant: { select: { id: true, name: true } },
+        property: { select: { id: true, name: true, address: true, imageUrl: true } },
+        tenant: { select: { id: true, name: true, email: true } },
       },
     });
 
-    // Auto-generate monthly payment rows for the entire lease term.
-    const dueDates = generateMonthlyDueDates(lease.startDate, lease.endDate);
+    await syncLeasePayments(lease.id, lease.startDate, lease.endDate, rent);
 
-    if (dueDates.length > 0) {
-      await prisma.payment.createMany({
-        data: dueDates.map((d) => ({
-          leaseId: lease.id,
-          amount: rent,
-          dueDate: d,
-          status: getInitialPaymentStatus(d),
-        })),
-      });
-    }
-
-    res.status(201).json({ ...lease, rentAmount: Number(lease.rentAmount) });
+    invalidateOwnerCache(user.id);
+    res.status(201).json(mapLease(lease));
   } catch (err) {
     handleLeaseWriteError(err, res, 'Failed to create lease');
   }
 });
 
-// GET /leases/:id
 router.get('/:id', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
   const { id } = req.params;
@@ -212,25 +253,28 @@ router.get('/:id', async (req, res: Response) => {
       return;
     }
 
-    res.json({
-      ...lease,
-      rentAmount: Number(lease.rentAmount),
-      payments: lease.payments.map((p) => ({
-        ...p,
-        amount: Number(p.amount),
-      })),
-    });
+    res.json(mapLease(lease));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch lease' });
   }
 });
 
-// PUT /leases/:id
 router.put('/:id', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
   const { id } = req.params;
-  const { propertyId, tenantId, rentAmount, startDate, endDate, status } = req.body;
+  const {
+    propertyId,
+    tenantId,
+    rentAmount,
+    startDate,
+    endDate,
+    status,
+    specialTerms,
+    concessions,
+    fees,
+    leaseDocumentUrl,
+  } = req.body;
 
   try {
     const existing = await prisma.lease.findFirst({
@@ -259,7 +303,9 @@ router.put('/:id', async (req, res: Response) => {
 
     const closingNow = status === 'closed' && existing.status !== 'closed';
     if (closingNow) {
-      const today = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()));
+      const today = new Date(
+        Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate())
+      );
       if (toDateKey(today) < toDateKey(nextEndDate)) {
         nextEndDate = today;
       }
@@ -270,7 +316,7 @@ router.put('/:id', async (req, res: Response) => {
       return;
     }
 
-    const nextStatus = status ?? (startDate || endDate ? deriveLeaseStatus(nextStartDate, nextEndDate) : existing.status);
+    const nextStatus = status ?? existing.status;
     const statusError = validateStatusForDates(nextStatus, nextStartDate, nextEndDate);
     if (statusError) {
       res.status(400).json({ error: statusError });
@@ -293,7 +339,7 @@ router.put('/:id', async (req, res: Response) => {
       return;
     }
     if (!tenant) {
-      res.status(403).json({ error: 'Tenant not found or unauthorized' });
+      res.status(403).json({ error: 'Resident not found or unauthorized' });
       return;
     }
 
@@ -312,31 +358,27 @@ router.put('/:id', async (req, res: Response) => {
         startDate: nextStartDate,
         endDate: nextEndDate,
         status: nextStatus,
+        specialTerms: specialTerms !== undefined ? cleanOptionalText(specialTerms) : undefined,
+        concessions: concessions !== undefined ? cleanOptionalText(concessions) : undefined,
+        fees: fees !== undefined ? cleanOptionalText(fees) : undefined,
+        leaseDocumentUrl:
+          leaseDocumentUrl !== undefined ? cleanOptionalUrl(leaseDocumentUrl) : undefined,
       },
       include: {
-        property: { select: { id: true, name: true } },
-        tenant: { select: { id: true, name: true } },
+        property: { select: { id: true, name: true, address: true, imageUrl: true } },
+        tenant: { select: { id: true, name: true, email: true } },
       },
     });
 
-    // Sync pending payments to new rent amount (paid/overdue keep their original amount)
-    if (rentAmount !== undefined || status === 'closed') {
-      await prisma.payment.updateMany({
-        where: { leaseId: id, status: 'pending' },
-        data: {
-          ...(rentAmount !== undefined ? { amount: nextRentAmount } : {}),
-          ...(status === 'closed' ? { status: 'expired' } : {}),
-        },
-      });
-    }
+    await syncLeasePayments(lease.id, nextStartDate, nextEndDate, nextRentAmount);
 
-    res.json({ ...lease, rentAmount: Number(lease.rentAmount) });
+    invalidateOwnerCache(user.id);
+    res.json(mapLease(lease));
   } catch (err) {
     handleLeaseWriteError(err, res, 'Failed to update lease');
   }
 });
 
-// DELETE /leases/:id
 router.delete('/:id', async (req, res: Response) => {
   const { user } = req as unknown as AuthenticatedRequest;
   const { id } = req.params;
@@ -357,6 +399,7 @@ router.delete('/:id', async (req, res: Response) => {
       prisma.lease.delete({ where: { id } }),
     ]);
 
+    invalidateOwnerCache(user.id);
     res.status(204).send();
   } catch (err) {
     console.error(err);
