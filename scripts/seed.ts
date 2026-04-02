@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 import { PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import { derivePaymentStatus } from '../src/lib/payment-status';
+import { generateMonthlyDueDates } from '../src/lib/lease-payments';
 dotenv.config();
 
 const prisma = new PrismaClient({
@@ -12,52 +13,10 @@ const prisma = new PrismaClient({
   },
 });
 
-function startOfMonth(date: Date) {
-  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
-}
-
-function generateMonthlyDueDates(startDate: Date, endDate: Date) {
-  const dueDates: Date[] = [];
-  let cursor = startOfMonth(startDate);
-
-  while (cursor < endDate) {
-    dueDates.push(new Date(cursor));
-    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1));
-  }
-
-  return dueDates;
-}
-
 function formatYearMonth(date: Date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
   return `${year}-${month}`;
-}
-
-function createPropertyImageDataUrl(name: string, accent: string) {
-  const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
-      <defs>
-        <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#eff6ff" />
-          <stop offset="100%" stop-color="#dbeafe" />
-        </linearGradient>
-      </defs>
-      <rect width="1200" height="800" fill="url(#sky)" />
-      <rect x="0" y="620" width="1200" height="180" fill="#d1d5db" />
-      <rect x="220" y="160" width="760" height="470" rx="26" fill="#ffffff" stroke="#cbd5e1" stroke-width="8" />
-      <rect x="220" y="160" width="760" height="86" rx="26" fill="${accent}" />
-      <rect x="310" y="300" width="160" height="220" rx="14" fill="#dbeafe" />
-      <rect x="520" y="300" width="160" height="220" rx="14" fill="#dbeafe" />
-      <rect x="730" y="300" width="160" height="220" rx="14" fill="#dbeafe" />
-      <rect x="525" y="470" width="150" height="160" rx="20" fill="#334155" />
-      <text x="600" y="710" text-anchor="middle" font-family="Arial, sans-serif" font-size="44" font-weight="700" fill="#0f172a">
-        ${name}
-      </text>
-    </svg>
-  `.trim();
-
-  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
 
 function getSeedPaymentSnapshot(dueDate: Date, now = new Date()) {
@@ -154,11 +113,7 @@ async function seed() {
     where: { ownerId: user.id },
   });
   await prisma.tenant.deleteMany({
-    where: {
-      id: {
-        startsWith: 'seed-tenant-',
-      },
-    },
+    where: { ownerId: user.id },
   });
   console.log('✅ Existing seed-linked data cleaned');
 
@@ -168,17 +123,20 @@ async function seed() {
     {
       name: 'Maple Street Apartments',
       address: '142 Maple St, Austin, TX 78701',
-      imageUrl: createPropertyImageDataUrl('Maple Street Apartments', '#2563eb'),
+      imageUrl:
+        'https://images.pexels.com/photos/29145562/pexels-photo-29145562.jpeg?auto=compress&cs=tinysrgb&w=1400&fit=crop',
     },
     {
       name: 'Oak Grove Townhomes',
       address: '891 Oak Grove Blvd, Austin, TX 78745',
-      imageUrl: createPropertyImageDataUrl('Oak Grove Townhomes', '#0f766e'),
+      imageUrl:
+        'https://images.pexels.com/photos/35018313/pexels-photo-35018313.jpeg?auto=compress&cs=tinysrgb&w=1400&fit=crop',
     },
     {
       name: 'River View Condos',
       address: '2204 Riverside Dr, Austin, TX 78741',
-      imageUrl: createPropertyImageDataUrl('River View Condos', '#7c3aed'),
+      imageUrl:
+        'https://images.pexels.com/photos/4997546/pexels-photo-4997546.jpeg?auto=compress&cs=tinysrgb&w=1400&fit=crop',
     },
   ];
 
